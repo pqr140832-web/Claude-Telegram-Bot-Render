@@ -8,7 +8,6 @@ from datetime import datetime, timezone, timedelta
 from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, CallbackQueryHandler, filters, ContextTypes
 import httpx
-from aiohttp import web
 
 # ============== 时区 ==============
 
@@ -1077,24 +1076,22 @@ async def background_loop(bot):
 
 # ============== Web 服务器（保活） ==============
 
+from flask import Flask
+import threading
+
+flask_app = Flask(__name__)
+
+@flask_app.route("/")
+def home():
+    return "Bot is alive! 🤖"
+
+@flask_app.route("/health")
+def health():
+    return "OK"
+
 def run_web_server():
-    async def health_check(request):
-        return web.Response(text="Bot is alive! 🤖")
-    
-    async def run():
-        app_web = web.Application()
-        app_web.router.add_get("/", health_check)
-        app_web.router.add_get("/health", health_check)
-        runner = web.AppRunner(app_web)
-        await runner.setup()
-        port = int(os.environ.get("PORT", 10000))
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-        print(f"Web server running on port {port}")
-        while True:
-            await asyncio.sleep(3600)
-    
-    asyncio.run(run())
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
 
 # ============== 主程序 ==============
 
@@ -1102,6 +1099,7 @@ def main():
     # 启动 Web 服务器线程
     web_thread = threading.Thread(target=run_web_server, daemon=True)
     web_thread.start()
+    print("Web server started")
     
     app = Application.builder().token(BOT_TOKEN).build()
     
@@ -1116,16 +1114,13 @@ def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    # 启动后台循环
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    print("Bot starting...")
     
-    async def start_background():
-        asyncio.create_task(background_loop(app.bot))
+    # 用 job_queue 启动后台循环
+    async def start_background(application):
+        asyncio.create_task(background_loop(application.bot))
     
     app.post_init = start_background
-    
-    print("Bot starting...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
