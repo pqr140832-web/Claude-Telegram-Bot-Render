@@ -467,24 +467,6 @@ async def call_judge_model(messages):
         messages
     )
 
-# ============== 判断用户是否说完 ==============
-
-async def judge_if_complete(pending_messages):
-    prompt = f"""用户发了以下消息：
-{chr(10).join([f'- {m["content"]}' for m in pending_messages])}
-
-判断用户是否说完了？
-- 如果用户明显还没说完（比如以"然后""但是""因为"结尾，或者话说到一半），回复：没说完
-- 如果用户可能说完了，回复：说完了
-
-只回复"说完了"或"没说完"三个字，不要说其他的。"""
-
-    try:
-        result = await call_judge_model([{"role": "user", "content": prompt}])
-        return "说完" in result
-    except:
-        return True
-
 # ============== 估算 Token ==============
 
 def estimate_tokens(text):
@@ -932,15 +914,17 @@ async def process_and_reply(bot, user_id, chat_id):
 
 # ============== 消息处理 ==============
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def message_handler(update: Update, context):
     user_id = update.effective_user.id
     chat_id = update.effective_chat.id
     text = update.message.text
     timestamp = get_cn_time().timestamp()
     
+    # 取消待发送的追问
     if user_id in pending_responses:
         del pending_responses[user_id]
     
+    # 添加到缓冲区
     if user_id not in message_buffers:
         message_buffers[user_id] = {"messages": []}
     
@@ -951,13 +935,9 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     message_buffers[user_id]["last_time"] = timestamp
     message_buffers[user_id]["chat_id"] = chat_id
     
-    is_complete = await judge_if_complete(message_buffers[user_id]["messages"])
+    # 固定等 7 秒
+    message_buffers[user_id]["wait_until"] = timestamp + 7
     
-    if is_complete:
-        message_buffers[user_id]["wait_until"] = timestamp + 5
-    else:
-        message_buffers[user_id]["wait_until"] = timestamp + 30
-
 # ============== Flask + Webhook ==============
 
 from flask import Flask, request, jsonify
