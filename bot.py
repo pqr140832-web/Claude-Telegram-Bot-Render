@@ -1091,9 +1091,12 @@ def health():
 
 def run_web_server():
     port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port)
+    flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
 
 # ============== 主程序 ==============
+
+async def post_init(application):
+    asyncio.create_task(background_loop(application.bot))
 
 def main():
     # 启动 Web 服务器线程
@@ -1101,7 +1104,12 @@ def main():
     web_thread.start()
     print("Web server started")
     
-    app = Application.builder().token(BOT_TOKEN).build()
+    app = (
+        Application.builder()
+        .token(BOT_TOKEN)
+        .post_init(post_init)
+        .build()
+    )
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
@@ -1115,12 +1123,6 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
     print("Bot starting...")
-    
-    # 用 job_queue 启动后台循环
-    async def start_background(application):
-        asyncio.create_task(background_loop(application.bot))
-    
-    app.post_init = start_background
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
