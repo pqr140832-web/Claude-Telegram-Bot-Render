@@ -1069,17 +1069,17 @@ async def health_check(request):
     return web.Response(text="Bot is alive! 🤖")
 
 async def run_web_server():
-    app = web.Application()
-    app.router.add_get("/", health_check)
-    app.router.add_get("/health", health_check)
-    runner = web.AppRunner(app)
+    app_web = web.Application()
+    app_web.router.add_get("/", health_check)
+    app_web.router.add_get("/health", health_check)
+    runner = web.AppRunner(app_web)
     await runner.setup()
     port = int(os.environ.get("PORT", 10000))
     site = web.TCPSite(runner, "0.0.0.0", port)
     await site.start()
     print(f"Web server running on port {port}")
 
-async def main():
+def main():
     app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
@@ -1092,21 +1092,17 @@ async def main():
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    # 启动 Web 服务器（保活用）
-    await run_web_server()
-    
-    # 启动后台循环
-    bot = app.bot
-    asyncio.create_task(background_loop(bot))
-    
     print("Bot starting...")
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling()
     
-    # 保持运行
-    while True:
-        await asyncio.sleep(3600)
+    # 用 post_init 启动其他任务
+    async def post_init(application):
+        await run_web_server()
+        asyncio.create_task(background_loop(application.bot))
+    
+    app.post_init = post_init
+    
+    # 正确的启动方式
+    app.run_polling()
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
