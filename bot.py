@@ -1063,6 +1063,21 @@ async def background_loop(bot):
         await asyncio.sleep(1)  # 每秒检查一次
 
 # ============== 主程序 ==============
+from aiohttp import web
+
+async def health_check(request):
+    return web.Response(text="Bot is alive! 🤖")
+
+async def run_web_server():
+    app = web.Application()
+    app.router.add_get("/", health_check)
+    app.router.add_get("/health", health_check)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server running on port {port}")
 
 async def main():
     app = Application.builder().token(BOT_TOKEN).build()
@@ -1076,6 +1091,9 @@ async def main():
     app.add_handler(CommandHandler("export", export_command))
     app.add_handler(CallbackQueryHandler(callback_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
+    
+    # 启动 Web 服务器（保活用）
+    await run_web_server()
     
     # 启动后台循环
     bot = app.bot
