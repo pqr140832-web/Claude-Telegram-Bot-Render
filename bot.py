@@ -964,8 +964,7 @@ from flask import Flask, request, jsonify
 import threading
 
 flask_app = Flask(__name__)
-BOT = None
-APP = None
+BOT = Bot(token=BOT_TOKEN)
 
 @flask_app.route("/")
 def home():
@@ -977,19 +976,85 @@ def health():
 
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
-    global APP
     if request.is_json:
-        update = Update.de_json(request.get_json(), BOT)
-        asyncio.run(APP.process_update(update))
+        data = request.get_json()
+        asyncio.run(handle_update(data))
     return jsonify({"ok": True})
 
+async def handle_update(data):
+    update = Update.de_json(data, BOT)
+    
+    # 手动处理命令和消息
+    if update.message:
+        text = update.message.text or ""
+        
+        if text.startswith("/start"):
+            await start_command(update, None)
+        elif text.startswith("/help"):
+            await help_command(update, None)
+        elif text.startswith("/points"):
+            await points_command(update, None)
+        elif text.startswith("/reset"):
+            await reset_command(update, None)
+        elif text.startswith("/context"):
+            # 简单处理 context 命令
+            await context_command_simple(update, text)
+        elif text.startswith("/model"):
+            await model_command(update, None)
+        elif text.startswith("/export"):
+            await export_command(update, None)
+        elif text.startswith("/adminreset"):
+            await admin_reset_command(update, None)
+        elif not text.startswith("/"):
+            await message_handler(update, None)
+    
+    elif update.callback_query:
+        await callback_handler(update, None)
+
+async def context_command_simple(update, text):
+    user_id = update.effective_user.id
+    user = get_user(user_id)
+    parts = text.split()
+    
+    if len(parts) == 1:
+        model_config = MODELS[user["model"]]
+        token_limit = user["context_token_limit"] or model_config["max_tokens"]
+        round_limit = user["context_round_limit"] or "unlimited"
+        
+        msg = f"""📝 Current Context Settings:
+
+• Token limit: {token_limit:,}
+• Round limit: {round_limit}
+• Model default: {model_config['max_tokens']:,} tokens"""
+        await update.message.reply_text(msg)
+        return
+    
+    if parts[1] == "reset":
+        user["context_token_limit"] = None
+        user["context_round_limit"] = None
+        save_user(user_id, user)
+        await update.message.reply_text("Context settings reset to default! 🔄")
+        return
+    
+    if len(parts) >= 3:
+        try:
+            value = int(parts[2])
+            if parts[1] == "token":
+                user["context_token_limit"] = value
+                save_user(user_id, user)
+                await update.message.reply_text(f"Token limit set to {value:,}! ✅")
+            elif parts[1] == "round":
+                user["context_round_limit"] = value
+                save_user(user_id, user)
+                await update.message.reply_text(f"Round limit set to {value}! ✅")
+        except:
+            await update.message.reply_text("Usage: /context token <num> or /context round <num>")
+
 def run_background():
-    """后台循环"""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
     async def background():
-        global BOT
         while True:
             try:
                 now = get_cn_time().timestamp()
@@ -1105,31 +1170,7 @@ def run_background():
     
     loop.run_until_complete(background())
 
-# ============== 主程序 ==============
-
-def setup_bot():
-    global BOT, APP
-    
-    APP = Application.builder().token(BOT_TOKEN).build()
-    BOT = APP.bot
-    
-    APP.add_handler(CommandHandler("start", start_command))
-    APP.add_handler(CommandHandler("help", help_command))
-    APP.add_handler(CommandHandler("points", points_command))
-    APP.add_handler(CommandHandler("reset", reset_command))
-    APP.add_handler(CommandHandler("context", context_command))
-    APP.add_handler(CommandHandler("model", model_command))
-    APP.add_handler(CommandHandler("export", export_command))
-    APP.add_handler(CommandHandler("adminreset", admin_reset_command))
-    APP.add_handler(CallbackQueryHandler(callback_handler))
-    APP.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    
-    print("Bot handlers registered")
-
-# 启动
-setup_bot()
-
-# 后台线程
+# 启动后台线程
 bg_thread = threading.Thread(target=run_background, daemon=True)
 bg_thread.start()
 print("Background thread started")
