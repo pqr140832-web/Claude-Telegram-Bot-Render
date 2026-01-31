@@ -1074,42 +1074,21 @@ async def background_loop(bot):
         
         await asyncio.sleep(1)
 
-# ============== Web 服务器（保活） ==============
-
-from flask import Flask
-import threading
-
-flask_app = Flask(__name__)
-
-@flask_app.route("/")
-def home():
-    return "Bot is alive! 🤖"
-
-@flask_app.route("/health")
-def health():
-    return "OK"
-
-def run_web_server():
-    port = int(os.environ.get("PORT", 10000))
-    flask_app.run(host="0.0.0.0", port=port, use_reloader=False)
-
-# ============== 主程序 ==============
-
-async def post_init(application):
-    asyncio.create_task(background_loop(application.bot))
-
-def main():
-    # 启动 Web 服务器线程
-    web_thread = threading.Thread(target=run_web_server, daemon=True)
-    web_thread.start()
-    print("Web server started")
+async def main():
+    # Web 服务器
+    web_app = web.Application()
+    web_app.router.add_get("/", health_handler)
+    web_app.router.add_get("/health", health_handler)
     
-    app = (
-        Application.builder()
-        .token(BOT_TOKEN)
-        .post_init(post_init)
-        .build()
-    )
+    runner = web.AppRunner(web_app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 10000))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server running on port {port}")
+    
+    # Telegram Bot
+    app = Application.builder().token(BOT_TOKEN).build()
     
     app.add_handler(CommandHandler("start", start_command))
     app.add_handler(CommandHandler("help", help_command))
@@ -1123,7 +1102,19 @@ def main():
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
     print("Bot starting...")
-    app.run_polling(drop_pending_updates=True)
+    
+    async with app:
+        # 启动后台循环
+        asyncio.create_task(background_loop(app.bot))
+        
+        # 启动 polling
+        await app.updater.start_polling(drop_pending_updates=True)
+        
+        print("Bot is running!")
+        
+        # 保持运行
+        while True:
+            await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
