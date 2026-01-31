@@ -958,163 +958,182 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         message_buffers[user_id]["wait_until"] = timestamp + 30
 
-# ============== 后台循环 ==============
+# ============== Flask + Webhook ==============
 
-async def background_loop(bot):
-    while True:
-        try:
-            now = get_cn_time().timestamp()
-            now_time = get_cn_time()
-            current_time_str = now_time.strftime("%H:%M")
-            today = now_time.strftime("%Y-%m-%d")
-            
-            # 处理消息缓冲区
-            for user_id, buffer in list(message_buffers.items()):
-                if buffer.get("messages") and buffer.get("wait_until"):
-                    if now >= buffer["wait_until"]:
-                        await process_and_reply(bot, user_id, buffer["chat_id"])
-            
-            # 处理追问（5分钟后）
-            for user_id, pending in list(pending_responses.items()):
-                if now - pending["time"] >= 300:
-                    await bot.send_message(
-                        chat_id=pending["chat_id"],
-                        text=pending["chase"]
-                    )
-                    user = get_user(user_id)
-                    user["history"].append({
-                        "role": "assistant",
-                        "content": pending["chase"],
-                        "timestamp": now
-                    })
-                    save_user(user_id, user)
-                    del pending_responses[user_id]
-            
-            # 处理定时/想念消息
-            data = load_data()
-            
-            for user_id, schedules in list(data.get("schedules", {}).items()):
-                new_schedules = []
-                for sched in schedules:
-                    if sched["time"] == current_time_str:
-                        user = get_user(int(user_id))
-                        chat_id = sched.get("chat_id") or user.get("chat_id")
-                        
-                        if not chat_id:
-                            continue
-                        
-                        if sched["type"] == "想念":
-                            last_activity = user.get("last_activity", 0)
-                            if now - last_activity < 300:
-                                new_schedules.append(sched)
+from flask import Flask, request, jsonify
+import threading
+
+flask_app = Flask(__name__)
+BOT = None
+APP = None
+
+@flask_app.route("/")
+def home():
+    return "Bot is running! 🤖"
+
+@flask_app.route("/health")
+def health():
+    return "OK"
+
+@flask_app.route("/webhook", methods=["POST"])
+def webhook():
+    global APP
+    if request.is_json:
+        update = Update.de_json(request.get_json(), BOT)
+        asyncio.run(APP.process_update(update))
+    return jsonify({"ok": True})
+
+def run_background():
+    """后台循环"""
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    
+    async def background():
+        global BOT
+        while True:
+            try:
+                now = get_cn_time().timestamp()
+                now_time = get_cn_time()
+                current_time_str = now_time.strftime("%H:%M")
+                today = now_time.strftime("%Y-%m-%d")
+                
+                # 处理消息缓冲区
+                for user_id, buffer in list(message_buffers.items()):
+                    if buffer.get("messages") and buffer.get("wait_until"):
+                        if now >= buffer["wait_until"]:
+                            await process_and_reply(BOT, user_id, buffer["chat_id"])
+                
+                # 处理追问（5分钟后）
+                for user_id, pending in list(pending_responses.items()):
+                    if now - pending["time"] >= 300:
+                        await BOT.send_message(
+                            chat_id=pending["chat_id"],
+                            text=pending["chase"]
+                        )
+                        user = get_user(user_id)
+                        user["history"].append({
+                            "role": "assistant",
+                            "content": pending["chase"],
+                            "timestamp": now
+                        })
+                        save_user(user_id, user)
+                        del pending_responses[user_id]
+                
+                # 处理定时/想念消息
+                data = load_data()
+                
+                for user_id, schedules in list(data.get("schedules", {}).items()):
+                    new_schedules = []
+                    for sched in schedules:
+                        if sched["time"] == current_time_str:
+                            user = get_user(int(user_id))
+                            chat_id = sched.get("chat_id") or user.get("chat_id")
+                            
+                            if not chat_id:
                                 continue
-                        
-                        prompt = f"你之前设定了一个{sched['type']}消息，提示是：{sched['hint']}\n现在时间到了，你想发什么？如果不想发了，回复 [[不发]]"
-                        messages = get_context_messages(user) + [{"role": "user", "content": prompt}]
-                        
-                        try:
-                            response = await call_main_model(user["model"], messages)
-                            if "[[不发]]" not in response:
-                                parsed = parse_response(response)
-                                await send_messages(bot, chat_id, parsed["reply"])
-                                user["history"].append({
-                                    "role": "assistant",
-                                    "content": parsed["reply"],
-                                    "timestamp": now
-                                })
-                                save_user(int(user_id), user)
-                        except Exception as e:
-                            print(f"[Schedule] Error: {e}")
-                    else:
-                        new_schedules.append(sched)
-                
-                data["schedules"][user_id] = new_schedules
-            
-            save_data(data)
-            
-            # 4-6小时没聊天，70%概率触发想念
-            for user_id_str, user_data in list(data.get("users", {}).items()):
-                last_activity = user_data.get("last_activity", 0)
-                if not last_activity:
-                    continue
+                            
+                            if sched["type"] == "想念":
+                                last_activity = user.get("last_activity", 0)
+                                if now - last_activity < 300:
+                                    new_schedules.append(sched)
+                                    continue
+                            
+                            prompt = f"你之前设定了一个{sched['type']}消息，提示是：{sched['hint']}\n现在时间到了，你想发什么？如果不想发了，回复 [[不发]]"
+                            messages = get_context_messages(user) + [{"role": "user", "content": prompt}]
+                            
+                            try:
+                                response = await call_main_model(user["model"], messages)
+                                if "[[不发]]" not in response:
+                                    parsed = parse_response(response)
+                                    await send_messages(BOT, chat_id, parsed["reply"])
+                                    user["history"].append({
+                                        "role": "assistant",
+                                        "content": parsed["reply"],
+                                        "timestamp": now
+                                    })
+                                    save_user(int(user_id), user)
+                            except Exception as e:
+                                print(f"[Schedule] Error: {e}")
+                        else:
+                            new_schedules.append(sched)
                     
-                hours_since = (now - last_activity) / 3600
-                chat_id = user_data.get("chat_id")
+                    data["schedules"][user_id] = new_schedules
                 
-                if not chat_id:
-                    continue
+                save_data(data)
                 
-                if 4 <= hours_since <= 6:
-                    if user_data.get("last_miss_trigger") == today:
+                # 4-6小时没聊天，70%概率触发想念
+                for user_id_str, user_data in list(data.get("users", {}).items()):
+                    last_activity = user_data.get("last_activity", 0)
+                    if not last_activity:
+                        continue
+                        
+                    hours_since = (now - last_activity) / 3600
+                    chat_id = user_data.get("chat_id")
+                    
+                    if not chat_id:
                         continue
                     
-                    if random.random() < 0.7:
-                        user = get_user(int(user_id_str))
+                    if 4 <= hours_since <= 6:
+                        if user_data.get("last_miss_trigger") == today:
+                            continue
                         
-                        prompt = f"你已经{int(hours_since)}小时没和用户聊天了。如果你想主动找用户聊聊，就发消息。如果不想，回复 [[不发]]"
-                        messages = get_context_messages(user) + [{"role": "user", "content": prompt}]
-                        
-                        try:
-                            response = await call_main_model(user["model"], messages)
-                            if "[[不发]]" not in response:
-                                parsed = parse_response(response)
-                                await send_messages(bot, chat_id, parsed["reply"])
-                                user["history"].append({
-                                    "role": "assistant",
-                                    "content": parsed["reply"],
-                                    "timestamp": now
-                                })
-                                user["last_miss_trigger"] = today
-                                save_user(int(user_id_str), user)
-                        except Exception as e:
-                            print(f"[Miss] Error: {e}")
+                        if random.random() < 0.7:
+                            user = get_user(int(user_id_str))
+                            
+                            prompt = f"你已经{int(hours_since)}小时没和用户聊天了。如果你想主动找用户聊聊，就发消息。如果不想，回复 [[不发]]"
+                            messages = get_context_messages(user) + [{"role": "user", "content": prompt}]
+                            
+                            try:
+                                response = await call_main_model(user["model"], messages)
+                                if "[[不发]]" not in response:
+                                    parsed = parse_response(response)
+                                    await send_messages(BOT, chat_id, parsed["reply"])
+                                    user["history"].append({
+                                        "role": "assistant",
+                                        "content": parsed["reply"],
+                                        "timestamp": now
+                                    })
+                                    user["last_miss_trigger"] = today
+                                    save_user(int(user_id_str), user)
+                            except Exception as e:
+                                print(f"[Miss] Error: {e}")
+                
+            except Exception as e:
+                print(f"[Background] Error: {e}")
             
-        except Exception as e:
-            print(f"[Background] Error: {e}")
-        
-        await asyncio.sleep(1)
+            await asyncio.sleep(1)
+    
+    loop.run_until_complete(background())
 
-async def main():
-    # Web 服务器
-    web_app = web.Application()
-    web_app.router.add_get("/", health_handler)
-    web_app.router.add_get("/health", health_handler)
+# ============== 主程序 ==============
+
+def setup_bot():
+    global BOT, APP
     
-    runner = web.AppRunner(web_app)
-    await runner.setup()
-    port = int(os.environ.get("PORT", 10000))
-    site = web.TCPSite(runner, "0.0.0.0", port)
-    await site.start()
-    print(f"Web server running on port {port}")
+    APP = Application.builder().token(BOT_TOKEN).build()
+    BOT = APP.bot
     
-    # Telegram Bot
-    app = Application.builder().token(BOT_TOKEN).build()
+    APP.add_handler(CommandHandler("start", start_command))
+    APP.add_handler(CommandHandler("help", help_command))
+    APP.add_handler(CommandHandler("points", points_command))
+    APP.add_handler(CommandHandler("reset", reset_command))
+    APP.add_handler(CommandHandler("context", context_command))
+    APP.add_handler(CommandHandler("model", model_command))
+    APP.add_handler(CommandHandler("export", export_command))
+    APP.add_handler(CommandHandler("adminreset", admin_reset_command))
+    APP.add_handler(CallbackQueryHandler(callback_handler))
+    APP.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
     
-    app.add_handler(CommandHandler("start", start_command))
-    app.add_handler(CommandHandler("help", help_command))
-    app.add_handler(CommandHandler("points", points_command))
-    app.add_handler(CommandHandler("reset", reset_command))
-    app.add_handler(CommandHandler("context", context_command))
-    app.add_handler(CommandHandler("model", model_command))
-    app.add_handler(CommandHandler("export", export_command))
-    app.add_handler(CommandHandler("adminreset", admin_reset_command))
-    app.add_handler(CallbackQueryHandler(callback_handler))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    
-    print("Bot starting...")
-    
-    async with app:
-        # 启动后台循环
-        asyncio.create_task(background_loop(app.bot))
-        
-        # 启动 polling
-        await app.updater.start_polling(drop_pending_updates=True)
-        
-        print("Bot is running!")
-        
-        # 保持运行
-        while True:
-            await asyncio.sleep(3600)
+    print("Bot handlers registered")
+
+# 启动
+setup_bot()
+
+# 后台线程
+bg_thread = threading.Thread(target=run_background, daemon=True)
+bg_thread.start()
+print("Background thread started")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    port = int(os.environ.get("PORT", 10000))
+    flask_app.run(host="0.0.0.0", port=port)
