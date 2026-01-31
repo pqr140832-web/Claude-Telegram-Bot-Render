@@ -946,7 +946,7 @@ import threading
 flask_app = Flask(__name__)
 from telegram.request import HTTPXRequest
 
-request = HTTPXRequest(
+bot_request = HTTPXRequest(
     connection_pool_size=20,
     read_timeout=30,
     write_timeout=30,
