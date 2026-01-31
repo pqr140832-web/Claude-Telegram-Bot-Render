@@ -944,7 +944,16 @@ from flask import Flask, request, jsonify
 import threading
 
 flask_app = Flask(__name__)
-BOT = Bot(token=BOT_TOKEN)
+from telegram.request import HTTPXRequest
+
+request = HTTPXRequest(
+    connection_pool_size=20,
+    read_timeout=30,
+    write_timeout=30,
+    connect_timeout=30,
+    pool_timeout=30
+)
+BOT = Bot(token=BOT_TOKEN, request=request)
 
 @flask_app.route("/")
 def home():
