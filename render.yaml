@@ -1,0 +1,29 @@
+services:
+  - type: worker
+    name: telegram-bot
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    envVars:
+      - key: BOT_TOKEN
+        sync: false
+      - key: API_URL_1
+        sync: false
+      - key: API_KEY_1
+        sync: false
+      - key: API_URL_2
+        sync: false
+      - key: API_KEY_2
+        sync: false
+      - key: API_URL_3
+        sync: false
+      - key: API_KEY_3
+        sync: false
+      - key: API_URL_4
+        sync: false
+      - key: API_KEY_4
+        sync: false
+      - key: API_URL_5
+        sync: false
+      - key: API_KEY_5
+        sync: false
