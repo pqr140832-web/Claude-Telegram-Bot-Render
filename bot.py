@@ -9,8 +9,6 @@ from telegram import Update, Bot
 from telegram.request import HTTPXRequest
 from telegram.ext import filters, ContextTypes
 import httpx
-import nest_asyncio
-nest_asyncio.apply()
 
 # ============== 时区 ==============
 
