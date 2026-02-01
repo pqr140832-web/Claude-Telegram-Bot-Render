@@ -938,21 +938,12 @@ async def message_handler(update, bot):
 # ============== Flask + Webhook ==============
 
 from flask import Flask, request as flask_request, jsonify
+import queue
 
 flask_app = Flask(__name__)
 
-# Bot 初始化
-bot_request = HTTPXRequest(
-    connection_pool_size=20,
-    read_timeout=30,
-    write_timeout=30,
-    connect_timeout=30,
-    pool_timeout=30
-)
-BOT = Bot(token=BOT_TOKEN, request=bot_request)
-
-# 创建共享的 event loop
-main_loop = asyncio.new_event_loop()
+# 消息队列
+update_queue = queue.Queue()
 
 @flask_app.route("/")
 def home():
@@ -966,44 +957,54 @@ def health():
 def webhook():
     if flask_request.is_json:
         data = flask_request.get_json()
-        main_loop.run_until_complete(handle_update(data))
+        update_queue.put(data)
     return jsonify({"ok": True})
 
-async def handle_update(data):
-    update = Update.de_json(data, BOT)
-    
-    if update.message:
-        text = update.message.text or ""
-        
-        if text.startswith("/start"):
-            await start_command(update, BOT)
-        elif text.startswith("/help"):
-            await help_command(update, BOT)
-        elif text.startswith("/points"):
-            await points_command(update, BOT)
-        elif text.startswith("/reset"):
-            await reset_command(update, BOT)
-        elif text.startswith("/context"):
-            await context_command(update, BOT, text)
-        elif text.startswith("/model"):
-            await model_command(update, BOT)
-        elif text.startswith("/export"):
-            await export_command(update, BOT)
-        elif text.startswith("/adminreset"):
-            await admin_reset_command(update, BOT)
-        elif not text.startswith("/"):
-            await message_handler(update, BOT)
-    
-    elif update.callback_query:
-        await callback_handler(update, BOT)
+# ============== 主循环 ==============
 
-# ============== 后台循环 ==============
-
-def run_background():
+def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    async def background():
+    # 在这个 loop 里创建 Bot
+    bot_request = HTTPXRequest(
+        connection_pool_size=20,
+        read_timeout=30,
+        write_timeout=30,
+        connect_timeout=30,
+        pool_timeout=30
+    )
+    bot = Bot(token=BOT_TOKEN, request=bot_request)
+    
+    async def handle_update(data):
+        update = Update.de_json(data, bot)
+        
+        if update.message:
+            text = update.message.text or ""
+            
+            if text.startswith("/start"):
+                await start_command(update, bot)
+            elif text.startswith("/help"):
+                await help_command(update, bot)
+            elif text.startswith("/points"):
+                await points_command(update, bot)
+            elif text.startswith("/reset"):
+                await reset_command(update, bot)
+            elif text.startswith("/context"):
+                await context_command(update, bot, text)
+            elif text.startswith("/model"):
+                await model_command(update, bot)
+            elif text.startswith("/export"):
+                await export_command(update, bot)
+            elif text.startswith("/adminreset"):
+                await admin_reset_command(update, bot)
+            elif not text.startswith("/"):
+                await message_handler(update, bot)
+        
+        elif update.callback_query:
+            await callback_handler(update, bot)
+    
+    async def main_loop():
         while True:
             try:
                 now = get_cn_time().timestamp()
@@ -1011,28 +1012,39 @@ def run_background():
                 current_time_str = now_time.strftime("%H:%M")
                 today = now_time.strftime("%Y-%m-%d")
                 
+                # 处理 webhook 收到的消息
+                while not update_queue.empty():
+                    try:
+                        data = update_queue.get_nowait()
+                        await handle_update(data)
+                    except Exception as e:
+                        print(f"[Update] Error: {e}")
+                
                 # 处理消息缓冲区
                 for user_id, buffer in list(message_buffers.items()):
                     if buffer.get("messages") and buffer.get("wait_until"):
                         if now >= buffer["wait_until"]:
                             print(f"[Background] Processing buffer for user {user_id}")
-                            await process_and_reply(BOT, user_id, buffer["chat_id"])
+                            await process_and_reply(bot, user_id, buffer["chat_id"])
                 
                 # 处理追问（5分钟后）
                 for user_id, pending in list(pending_responses.items()):
                     if now - pending["time"] >= 300:
                         print(f"[Background] Sending chase to user {user_id}")
-                        await BOT.send_message(
-                            chat_id=pending["chat_id"],
-                            text=pending["chase"]
-                        )
-                        user = get_user(user_id)
-                        user["history"].append({
-                            "role": "assistant",
-                            "content": pending["chase"],
-                            "timestamp": now
-                        })
-                        save_user(user_id, user)
+                        try:
+                            await bot.send_message(
+                                chat_id=pending["chat_id"],
+                                text=pending["chase"]
+                            )
+                            user = get_user(user_id)
+                            user["history"].append({
+                                "role": "assistant",
+                                "content": pending["chase"],
+                                "timestamp": now
+                            })
+                            save_user(user_id, user)
+                        except Exception as e:
+                            print(f"[Chase] Error: {e}")
                         del pending_responses[user_id]
                 
                 # 处理定时/想念消息
@@ -1063,7 +1075,7 @@ def run_background():
                                 response = await call_main_model(user["model"], messages)
                                 if "[[不发]]" not in response:
                                     parsed = parse_response(response)
-                                    await send_messages(BOT, chat_id, parsed["reply"])
+                                    await send_messages(bot, chat_id, parsed["reply"])
                                     user["history"].append({
                                         "role": "assistant",
                                         "content": parsed["reply"],
@@ -1106,7 +1118,7 @@ def run_background():
                                 response = await call_main_model(user["model"], messages)
                                 if "[[不发]]" not in response:
                                     parsed = parse_response(response)
-                                    await send_messages(BOT, chat_id, parsed["reply"])
+                                    await send_messages(bot, chat_id, parsed["reply"])
                                     user["history"].append({
                                         "role": "assistant",
                                         "content": parsed["reply"],
@@ -1118,17 +1130,19 @@ def run_background():
                                 print(f"[Miss] Error: {e}")
                 
             except Exception as e:
-                print(f"[Background] Error: {e}")
+                print(f"[MainLoop] Error: {e}")
             
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.1)
     
-    loop.run_until_complete(background())
+    print("Bot loop started")
+    loop.run_until_complete(main_loop())
 
 # ============== 启动 ==============
 
-bg_thread = threading.Thread(target=run_background, daemon=True)
-bg_thread.start()
-print("Background thread started")
+# 启动 bot 线程
+bot_thread = threading.Thread(target=run_bot, daemon=True)
+bot_thread.start()
+print("Bot thread started")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
