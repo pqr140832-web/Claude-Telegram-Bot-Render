@@ -940,11 +940,17 @@ def home():
 def health():
     return "OK"
 
+import nest_asyncio
+nest_asyncio.apply()
+
+# 创建一个共享的 event loop
+main_loop = asyncio.new_event_loop()
+
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
     if flask_request.is_json:
         data = flask_request.get_json()
-        asyncio.run(handle_update(data))
+        main_loop.run_until_complete(handle_update(data))
     return jsonify({"ok": True})
 
 async def handle_update(data):
