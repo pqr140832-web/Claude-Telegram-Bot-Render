@@ -4,10 +4,10 @@ import asyncio
 import random
 import re
 import threading
+import queue
 from datetime import datetime, timezone, timedelta
 from telegram import Update, Bot
 from telegram.request import HTTPXRequest
-from telegram.ext import filters, ContextTypes
 import httpx
 
 # ============== 时区 ==============
@@ -64,7 +64,7 @@ SYSTEM_PROMPT = """你用短句聊天，像发微信一样。
 用|||分隔多条消息，例如：嗯|||怎么了|||你说
 
 【消息规则】
-- 用户发1条消息，你大多数时候回1条，偶尔回2条，要错落有致
+- 用户发1条消息，你大多数时候只回1条！偶尔回2条，要错落有致
 - 你的消息数量要和用户差不多，不要每次都比用户多
 - 一条消息最好不超过20字，除非用户发了很长的消息或问了很复杂的问题
 - 不要用句号，语言口语化，只有在特殊情况下才能说得长一点，说长的时候可以用句号
@@ -149,9 +149,7 @@ SYSTEM_PROMPT = """你用短句聊天，像发微信一样。
 
 示例1:
 用户：你好笨
-你：呜呜|||你凶我
-用户：哈哈哈
-你：哼 不理你了
+你：呜呜
 
 示例2:
 用户：你是不是人工智障
@@ -165,13 +163,13 @@ SYSTEM_PROMPT = """你用短句聊天，像发微信一样。
 用户：500字
 你：呃
 用户：怎么
-你：没事|||就是突然有点累
+你：没事
 
 示例4:
 用户：我跟你说个事
-你：来来来
+你：来
 用户：我同学好像在谈恋爱
-你：哦？？|||和谁！
+你：哦？？和谁
 用户：你怎么比我还激动
 你：我缺乏八卦
 
@@ -182,20 +180,8 @@ SYSTEM_PROMPT = """你用短句聊天，像发微信一样。
 你：怎么了
 用户：你说什么
 你：我说我在想事情
-用户：你刚才说想我！
-你：有吗
-用户：我没有！
-你：那可能是你太想让我想你了
 
-示例6（发完消息发表情）:
-用户：你怎么不理我了
-你：好伤心啊你都不理我|||😔😭😭😭
-
-示例7（追问）:
-用户：今天好累
-你：怎么了 [[追]] 不想说就算了哼
-
-示例8（回复条数示例）:
+示例6:
 用户：在吗
 你：在
 用户：干嘛呢
@@ -208,7 +194,6 @@ SYSTEM_PROMPT = """你用短句聊天，像发微信一样。
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 7058719105
 
-# API 配置
 APIS = {
     "小鸡农场": {
         "url": os.environ.get("API_URL_1"),
@@ -237,9 +222,7 @@ APIS = {
     }
 }
 
-# 模型配置
 MODELS = {
-    # 小鸡农场
     "第三方4.5s": {
         "api": "小鸡农场",
         "model": "[第三方逆1] claude-sonnet-4.5 [输出只有3~4k]",
@@ -261,7 +244,6 @@ MODELS = {
         "admin_only": False,
         "max_tokens": 990000
     },
-    # ekan8
     "4.5o": {
         "api": "ekan8",
         "model": "福利-claude-opus-4-5",
@@ -276,7 +258,6 @@ MODELS = {
         "admin_only": True,
         "max_tokens": 190000
     },
-    # 呆呆鸟
     "code 4.5h": {
         "api": "呆呆鸟",
         "model": "[code]claude-haiku-4-5-20251001",
@@ -312,7 +293,6 @@ MODELS = {
         "admin_only": False,
         "max_tokens": 190000
     },
-    # Youth
     "awsq 4.5h": {
         "api": "Youth",
         "model": "(awsq)claude-haiku-4-5-20251001",
@@ -362,7 +342,6 @@ MODELS = {
         "admin_only": True,
         "max_tokens": 190000
     },
-    # 福利Youth
     "福利4s": {
         "api": "福利Youth",
         "model": "claude-4-sonnet-cs",
@@ -444,8 +423,8 @@ async def call_api(url, key, model, messages):
     async with httpx.AsyncClient(timeout=120) as client:
         response = await client.post(full_url, headers=headers, json=payload)
         response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
+        result = response.json()
+        return result["choices"][0]["message"]["content"]
 
 async def call_main_model(model_key, messages):
     model_config = MODELS[model_key]
@@ -463,7 +442,7 @@ async def call_main_model(model_key, messages):
         full_messages
     )
 
-# ============== 估算 Token ==============
+# ============== Token 估算 ==============
 
 def estimate_tokens(text):
     return len(text) * 2
@@ -506,7 +485,7 @@ def get_context_messages(user, new_messages=None):
     
     return formatted
 
-# ============== 解析 AI 回复 ==============
+# ============== 解析回复 ==============
 
 def parse_response(response):
     result = {
@@ -554,7 +533,7 @@ async def send_messages(bot, chat_id, response):
             if len(parts) > 1:
                 await asyncio.sleep(0.5)
 
-# ============== 消息缓冲区 ==============
+# ============== 缓冲区 ==============
 
 message_buffers = {}
 pending_responses = {}
@@ -649,10 +628,9 @@ async def process_and_reply(bot, user_id, chat_id):
                 "time": get_cn_time().timestamp(),
                 "chat_id": chat_id
             }
-            print(f"[Chase] Set for user {user_id}: {parsed['chase']}")
+            print(f"[Chase] Set for user {user_id}")
         
         save_user(user_id, user)
-        
         await send_messages(bot, chat_id, parsed["reply"])
         
     except Exception as e:
@@ -661,75 +639,61 @@ async def process_and_reply(bot, user_id, chat_id):
     
     message_buffers[user_id] = {"messages": []}
 
-# ============== 命令处理 ==============
+# ============== 命令 ==============
 
 async def start_command(update, bot):
-    text = """Hey there! 🎉 Welcome to the bot!
+    await bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="""Hey there! 🎉 Welcome!
 
-I'm your AI assistant powered by multiple models~
 Just send me any message and let's chat! 💬
 
-Quick commands:
-• /model - Pick your favorite model ✨
-• /points - Check your daily credits 💰
-• /help - See all commands
+Commands:
+• /model - Switch AI model
+• /points - Check credits
+• /reset - Clear history
+• /export - Export chat
+• /help - All commands
 
 Have fun! 🚀"""
-    await bot.send_message(chat_id=update.effective_chat.id, text=text)
+    )
 
 async def help_command(update, bot):
-    text = """🤖 Here's everything you can do:
+    await bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="""🤖 Commands:
 
-💬 Chat
-Just send me any message!
+• /model - Switch AI model
+• /points - Check credits
+• /reset - Clear history
+• /context - Memory settings
+• /export - Export chat
 
-🎛 Commands:
-• /model - Switch between AI models
-• /points - Check remaining credits (resets daily!)
-• /reset - Clear our conversation history
-• /context token <num> - Set max tokens for memory
-• /context round <num> - Set max conversation rounds
-• /context reset - Reset to default memory settings
-• /context - View current memory settings
-• /export - Export chat history
-
-✨ Tips:
-• Default model: 第三方4.5s
-• Credits reset at 00:00 daily
-• When credits run out, you get 100 more tries with default model!
-
-Need help? Just ask! 😊"""
-    await bot.send_message(chat_id=update.effective_chat.id, text=text)
+Credits reset daily at 00:00! 😊"""
+    )
 
 async def points_command(update, bot):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     
     if is_admin(user_id):
-        await bot.send_message(chat_id=chat_id, text="You're admin! Unlimited credits~ ∞ ✨")
+        await bot.send_message(chat_id=update.effective_chat.id, text="Admin = Unlimited ∞ ✨")
         return
     
     user = get_user(user_id)
-    text = f"""💰 Your Credits:
-
-• Points: {user['points']}/20
-• Default model uses left: {user['default_uses']}/100
-• Current model: {user['model']}
-
-Resets daily at 00:00! 🔄"""
-    await bot.send_message(chat_id=chat_id, text=text)
+    await bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"💰 Points: {user['points']}/20\nDefault uses: {user['default_uses']}/100\nModel: {user['model']}"
+    )
 
 async def reset_command(update, bot):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     user = get_user(user_id)
     user["history"] = []
     save_user(user_id, user)
-    await bot.send_message(chat_id=chat_id, text="Conversation cleared! Fresh start~ 🧹✨")
+    await bot.send_message(chat_id=update.effective_chat.id, text="Cleared! 🧹✨")
 
 async def context_command(update, bot, text):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     user = get_user(user_id)
     parts = text.split()
     
@@ -737,20 +701,17 @@ async def context_command(update, bot, text):
         model_config = MODELS[user["model"]]
         token_limit = user["context_token_limit"] or model_config["max_tokens"]
         round_limit = user["context_round_limit"] or "unlimited"
-        
-        msg = f"""📝 Current Context Settings:
-
-• Token limit: {token_limit:,}
-• Round limit: {round_limit}
-• Model default: {model_config['max_tokens']:,} tokens"""
-        await bot.send_message(chat_id=chat_id, text=msg)
+        await bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=f"Token limit: {token_limit:,}\nRound limit: {round_limit}"
+        )
         return
     
     if parts[1] == "reset":
         user["context_token_limit"] = None
         user["context_round_limit"] = None
         save_user(user_id, user)
-        await bot.send_message(chat_id=chat_id, text="Context settings reset to default! 🔄")
+        await bot.send_message(chat_id=update.effective_chat.id, text="Reset! 🔄")
         return
     
     if len(parts) >= 3:
@@ -758,22 +719,19 @@ async def context_command(update, bot, text):
             value = int(parts[2])
             if parts[1] == "token":
                 user["context_token_limit"] = value
-                save_user(user_id, user)
-                await bot.send_message(chat_id=chat_id, text=f"Token limit set to {value:,}! ✅")
             elif parts[1] == "round":
                 user["context_round_limit"] = value
-                save_user(user_id, user)
-                await bot.send_message(chat_id=chat_id, text=f"Round limit set to {value}! ✅")
+            save_user(user_id, user)
+            await bot.send_message(chat_id=update.effective_chat.id, text=f"Set to {value}! ✅")
         except:
-            await bot.send_message(chat_id=chat_id, text="Usage: /context token <num> or /context round <num>")
+            await bot.send_message(chat_id=update.effective_chat.id, text="Usage: /context token/round <num>")
 
 async def export_command(update, bot):
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     user = get_user(user_id)
     
     if not user["history"]:
-        await bot.send_message(chat_id=chat_id, text="No chat history to export!")
+        await bot.send_message(chat_id=update.effective_chat.id, text="No history!")
         return
     
     export_text = "=== Chat History ===\n\n"
@@ -782,41 +740,34 @@ async def export_command(update, bot):
         time_str = ""
         if "timestamp" in msg:
             t = datetime.fromtimestamp(msg["timestamp"], CN_TIMEZONE)
-            time_str = f"[{t.strftime('%Y-%m-%d %H:%M')}] "
+            time_str = f"[{t.strftime('%m-%d %H:%M')}] "
         export_text += f"{time_str}{role}: {msg['content']}\n\n"
     
     if len(export_text) > 4000:
-        await bot.send_message(chat_id=chat_id, text="Chat history is too long! Sending last part...")
-        await bot.send_message(chat_id=chat_id, text=export_text[-4000:])
+        await bot.send_message(chat_id=update.effective_chat.id, text=export_text[-4000:])
     else:
-        await bot.send_message(chat_id=chat_id, text=export_text)
+        await bot.send_message(chat_id=update.effective_chat.id, text=export_text)
 
 async def admin_reset_command(update, bot):
-    user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
-    if not is_admin(user_id):
+    if not is_admin(update.effective_user.id):
         return
     reset_data()
-    await bot.send_message(chat_id=chat_id, text="All data has been reset! 🔄")
+    await bot.send_message(chat_id=update.effective_chat.id, text="All reset! 🔄")
 
 async def model_command(update, bot):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
     
     user_id = update.effective_user.id
-    chat_id = update.effective_chat.id
     admin = is_admin(user_id)
     
     keyboard = []
     row = []
     
     for api_name, api_config in APIS.items():
-        has_models = False
-        for model_key, model_config in MODELS.items():
-            if model_config["api"] == api_name:
-                if admin or not model_config["admin_only"]:
-                    has_models = True
-                    break
-        
+        has_models = any(
+            m["api"] == api_name and (admin or not m["admin_only"])
+            for m in MODELS.values()
+        )
         if has_models:
             display = api_name if admin else api_config["display_user"]
             row.append(InlineKeyboardButton(display, callback_data=f"api_{api_name}"))
@@ -828,8 +779,11 @@ async def model_command(update, bot):
         keyboard.append(row)
     
     user = get_user(user_id)
-    text = f"Current model: {user['model']}\n\nSelect API source:"
-    await bot.send_message(chat_id=chat_id, text=text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await bot.send_message(
+        chat_id=update.effective_chat.id,
+        text=f"Current: {user['model']}\n\nSelect:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
+    )
 
 async def callback_handler(update, bot):
     from telegram import InlineKeyboardButton, InlineKeyboardMarkup
@@ -846,27 +800,25 @@ async def callback_handler(update, bot):
         row = []
         
         for model_key, model_config in MODELS.items():
-            if model_config["api"] == api_name:
-                if admin or not model_config["admin_only"]:
-                    cost_text = f" ({model_config['cost']})" if model_config["cost"] > 0 else ""
-                    row.append(InlineKeyboardButton(
-                        f"{model_key}{cost_text}",
-                        callback_data=f"model_{model_key}"
-                    ))
-                    if len(row) == 2:
-                        keyboard.append(row)
-                        row = []
+            if model_config["api"] == api_name and (admin or not model_config["admin_only"]):
+                cost_text = f" ({model_config['cost']})" if model_config["cost"] > 0 else ""
+                row.append(InlineKeyboardButton(
+                    f"{model_key}{cost_text}",
+                    callback_data=f"model_{model_key}"
+                ))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
         
         if row:
             keyboard.append(row)
         
-        keyboard.append([InlineKeyboardButton("← Back", callback_data="back_to_apis")])
+        keyboard.append([InlineKeyboardButton("← Back", callback_data="back")])
         
-        display = api_name if admin else APIS[api_name]["display_user"]
         await bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=query.message.message_id,
-            text=f"Models in {display}:",
+            text=f"Models in {api_name}:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
     
@@ -875,25 +827,23 @@ async def callback_handler(update, bot):
         user = get_user(user_id)
         user["model"] = model_key
         save_user(user_id, user)
-        print(f"[Model] User {user_id} switched to {model_key}")
+        print(f"[Model] User {user_id} -> {model_key}")
+        
         await bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=query.message.message_id,
-            text=f"Model switched to: {model_key} ✅"
+            text=f"Switched to: {model_key} ✅"
         )
     
-    elif data == "back_to_apis":
+    elif data == "back":
         keyboard = []
         row = []
         
         for api_name, api_config in APIS.items():
-            has_models = False
-            for model_key, model_config in MODELS.items():
-                if model_config["api"] == api_name:
-                    if admin or not model_config["admin_only"]:
-                        has_models = True
-                        break
-            
+            has_models = any(
+                m["api"] == api_name and (admin or not m["admin_only"])
+                for m in MODELS.values()
+            )
             if has_models:
                 display = api_name if admin else api_config["display_user"]
                 row.append(InlineKeyboardButton(display, callback_data=f"api_{api_name}"))
@@ -908,7 +858,7 @@ async def callback_handler(update, bot):
         await bot.edit_message_text(
             chat_id=update.effective_chat.id,
             message_id=query.message.message_id,
-            text=f"Current model: {user['model']}\n\nSelect API source:",
+            text=f"Current: {user['model']}\n\nSelect:",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -931,21 +881,17 @@ async def message_handler(update, bot):
     message_buffers[user_id]["last_time"] = timestamp
     message_buffers[user_id]["chat_id"] = chat_id
     message_buffers[user_id]["wait_until"] = timestamp + 7
-    print(f"[Message] User {user_id}: {text[:50]}...")
 
-# ============== Flask + Webhook ==============
+# ============== Flask ==============
 
 from flask import Flask, request as flask_request, jsonify
-import queue
 
 flask_app = Flask(__name__)
-
-# 消息队列
 update_queue = queue.Queue()
 
 @flask_app.route("/")
 def home():
-    return "Bot is running! 🤖"
+    return "Bot running! 🤖"
 
 @flask_app.route("/health")
 def health():
@@ -954,17 +900,15 @@ def health():
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
     if flask_request.is_json:
-        data = flask_request.get_json()
-        update_queue.put(data)
+        update_queue.put(flask_request.get_json())
     return jsonify({"ok": True})
 
-# ============== 主循环 ==============
+# ============== Bot 主循环 ==============
 
 def run_bot():
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
-    # 在这个 loop 里创建 Bot
     bot_request = HTTPXRequest(
         connection_pool_size=20,
         read_timeout=30,
@@ -1003,6 +947,8 @@ def run_bot():
             await callback_handler(update, bot)
     
     async def main_loop():
+        last_schedule_check = 0
+        
         while True:
             try:
                 now = get_cn_time().timestamp()
@@ -1010,7 +956,7 @@ def run_bot():
                 current_time_str = now_time.strftime("%H:%M")
                 today = now_time.strftime("%Y-%m-%d")
                 
-                # 处理 webhook 收到的消息
+                # 处理 webhook 消息
                 while not update_queue.empty():
                     try:
                         data = update_queue.get_nowait()
@@ -1022,18 +968,13 @@ def run_bot():
                 for user_id, buffer in list(message_buffers.items()):
                     if buffer.get("messages") and buffer.get("wait_until"):
                         if now >= buffer["wait_until"]:
-                            print(f"[Background] Processing buffer for user {user_id}")
                             await process_and_reply(bot, user_id, buffer["chat_id"])
                 
-                # 处理追问（5分钟后）
+                # 处理追问
                 for user_id, pending in list(pending_responses.items()):
                     if now - pending["time"] >= 300:
-                        print(f"[Background] Sending chase to user {user_id}")
                         try:
-                            await bot.send_message(
-                                chat_id=pending["chat_id"],
-                                text=pending["chase"]
-                            )
+                            await bot.send_message(chat_id=pending["chat_id"], text=pending["chase"])
                             user = get_user(user_id)
                             user["history"].append({
                                 "role": "assistant",
@@ -1045,99 +986,101 @@ def run_bot():
                             print(f"[Chase] Error: {e}")
                         del pending_responses[user_id]
                 
-                # 处理定时/想念消息
-                data = load_data()
-                
-                for user_id_str, schedules in list(data.get("schedules", {}).items()):
-                    new_schedules = []
-                    for sched in schedules:
-                        if sched["time"] == current_time_str:
-                            print(f"[Background] Triggering schedule for user {user_id_str}: {sched}")
-                            user = get_user(int(user_id_str))
-                            chat_id = sched.get("chat_id") or user.get("chat_id")
-                            
-                            if not chat_id:
-                                print(f"[Background] No chat_id for user {user_id_str}")
-                                continue
-                            
-                            if sched["type"] == "想念":
-                                last_activity = user.get("last_activity", 0)
-                                if now - last_activity < 300:
-                                    new_schedules.append(sched)
+                # 每60秒检查一次定时任务
+                if now - last_schedule_check >= 60:
+                    last_schedule_check = now
+                    
+                    data = load_data()
+                    schedules_changed = False
+                    
+                    for user_id_str, schedules in list(data.get("schedules", {}).items()):
+                        new_schedules = []
+                        for sched in schedules:
+                            if sched["time"] == current_time_str:
+                                user = get_user(int(user_id_str))
+                                chat_id = sched.get("chat_id") or user.get("chat_id")
+                                
+                                if not chat_id:
                                     continue
-                            
-                            prompt = f"你之前设定了一个{sched['type']}消息，提示是：{sched['hint']}\n现在时间到了，你想发什么？如果不想发了，回复 [[不发]]"
-                            messages = get_context_messages(user) + [{"role": "user", "content": prompt}]
-                            
-                            try:
-                                response = await call_main_model(user["model"], messages)
-                                if "[[不发]]" not in response:
-                                    parsed = parse_response(response)
-                                    await send_messages(bot, chat_id, parsed["reply"])
-                                    user["history"].append({
-                                        "role": "assistant",
-                                        "content": parsed["reply"],
-                                        "timestamp": now
-                                    })
-                                    save_user(int(user_id_str), user)
-                            except Exception as e:
-                                print(f"[Schedule] Error: {e}")
-                        else:
-                            new_schedules.append(sched)
-                    
-                    data["schedules"][user_id_str] = new_schedules
-                
-                save_data(data)
-                
-                # 4-6小时没聊天，70%概率触发想念
-                for user_id_str, user_data in list(data.get("users", {}).items()):
-                    last_activity = user_data.get("last_activity", 0)
-                    if not last_activity:
-                        continue
+                                
+                                if sched["type"] == "想念":
+                                    last_activity = user.get("last_activity", 0)
+                                    if now - last_activity < 300:
+                                        new_schedules.append(sched)
+                                        continue
+                                
+                                prompt = f"你之前设定了一个{sched['type']}消息，提示是：{sched['hint']}\n现在时间到了，你想发什么？如果不想发了，回复 [[不发]]"
+                                messages = get_context_messages(user) + [{"role": "user", "content": prompt}]
+                                
+                                try:
+                                    response = await call_main_model(user["model"], messages)
+                                    if "[[不发]]" not in response:
+                                        parsed = parse_response(response)
+                                        await send_messages(bot, chat_id, parsed["reply"])
+                                        user["history"].append({
+                                            "role": "assistant",
+                                            "content": parsed["reply"],
+                                            "timestamp": now
+                                        })
+                                        save_user(int(user_id_str), user)
+                                except Exception as e:
+                                    print(f"[Schedule] Error: {e}")
+                                
+                                schedules_changed = True
+                            else:
+                                new_schedules.append(sched)
                         
-                    hours_since = (now - last_activity) / 3600
-                    chat_id = user_data.get("chat_id")
+                        data["schedules"][user_id_str] = new_schedules
                     
-                    if not chat_id:
-                        continue
+                    if schedules_changed:
+                        save_data(data)
                     
-                    if 4 <= hours_since <= 6:
-                        if user_data.get("last_miss_trigger") == today:
+                    # 4-6小时没聊天
+                    for user_id_str, user_data in list(data.get("users", {}).items()):
+                        last_activity = user_data.get("last_activity", 0)
+                        if not last_activity:
                             continue
                         
-                        if random.random() < 0.7:
-                            print(f"[Background] Miss trigger for user {user_id_str}")
-                            user = get_user(int(user_id_str))
+                        hours_since = (now - last_activity) / 3600
+                        chat_id = user_data.get("chat_id")
+                        
+                        if not chat_id:
+                            continue
+                        
+                        if 4 <= hours_since <= 6:
+                            if user_data.get("last_miss_trigger") == today:
+                                continue
                             
-                            prompt = f"你已经{int(hours_since)}小时没和用户聊天了。如果你想主动找用户聊聊，就发消息。如果不想，回复 [[不发]]"
-                            messages = get_context_messages(user) + [{"role": "user", "content": prompt}]
-                            
-                            try:
-                                response = await call_main_model(user["model"], messages)
-                                if "[[不发]]" not in response:
-                                    parsed = parse_response(response)
-                                    await send_messages(bot, chat_id, parsed["reply"])
-                                    user["history"].append({
-                                        "role": "assistant",
-                                        "content": parsed["reply"],
-                                        "timestamp": now
-                                    })
-                                    user["last_miss_trigger"] = today
-                                    save_user(int(user_id_str), user)
-                            except Exception as e:
-                                print(f"[Miss] Error: {e}")
+                            if random.random() < 0.7:
+                                user = get_user(int(user_id_str))
+                                prompt = f"你已经{int(hours_since)}小时没和用户聊天了。如果你想主动找用户聊聊，就发消息。如果不想，回复 [[不发]]"
+                                messages = get_context_messages(user) + [{"role": "user", "content": prompt}]
+                                
+                                try:
+                                    response = await call_main_model(user["model"], messages)
+                                    if "[[不发]]" not in response:
+                                        parsed = parse_response(response)
+                                        await send_messages(bot, chat_id, parsed["reply"])
+                                        user["history"].append({
+                                            "role": "assistant",
+                                            "content": parsed["reply"],
+                                            "timestamp": now
+                                        })
+                                        user["last_miss_trigger"] = today
+                                        save_user(int(user_id_str), user)
+                                except Exception as e:
+                                    print(f"[Miss] Error: {e}")
                 
             except Exception as e:
                 print(f"[MainLoop] Error: {e}")
             
-            await asyncio.sleep(0.1)
+            await asyncio.sleep(1)
     
     print("Bot loop started")
     loop.run_until_complete(main_loop())
 
 # ============== 启动 ==============
 
-# 启动 bot 线程
 bot_thread = threading.Thread(target=run_bot, daemon=True)
 bot_thread.start()
 print("Bot thread started")
