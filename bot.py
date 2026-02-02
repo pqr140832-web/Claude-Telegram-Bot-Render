@@ -912,7 +912,9 @@ def health():
 @flask_app.route("/webhook", methods=["POST"])
 def webhook():
     if flask_request.is_json:
-        update_queue.put(flask_request.get_json())
+        data = flask_request.get_json()
+        print(f"[Webhook] Received: {data.get('callback_query', {}).get('data', 'no callback')}")
+        update_queue.put(data)
     return jsonify({"ok": True})
 
 # ============== Bot 主循环 ==============
