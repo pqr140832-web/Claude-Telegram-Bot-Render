@@ -194,6 +194,18 @@ SYSTEM_PROMPT = """你用短句聊天，像发微信一样。
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 ADMIN_ID = 7058719105
 
+# 调试：打印环境变量
+print(f"[Debug] API_URL_1: {os.environ.get('API_URL_1')}")
+print(f"[Debug] API_KEY_1: {os.environ.get('API_KEY_1')}")
+print(f"[Debug] API_URL_2: {os.environ.get('API_URL_2')}")
+print(f"[Debug] API_KEY_2: {os.environ.get('API_KEY_2')}")
+print(f"[Debug] API_URL_3: {os.environ.get('API_URL_3')}")
+print(f"[Debug] API_KEY_3: {os.environ.get('API_KEY_3')}")
+print(f"[Debug] API_URL_4: {os.environ.get('API_URL_4')}")
+print(f"[Debug] API_KEY_4: {os.environ.get('API_KEY_4')}")
+print(f"[Debug] API_URL_5: {os.environ.get('API_URL_5')}")
+print(f"[Debug] API_KEY_5: {os.environ.get('API_KEY_5')}")
+
 APIS = {
     "小鸡农场": {
         "url": os.environ.get("API_URL_1"),
