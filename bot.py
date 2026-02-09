@@ -97,8 +97,7 @@ def get_image(image_id):
         return doc["data"]
     return None
 
-def compress_image(image_bytes, max_size=1024, quality=70):
-    """压缩图片，返回base64"""
+def compress_image(image_bytes, max_size=800, quality=50):
     try:
         img = Image.open(io.BytesIO(image_bytes))
         if img.mode == 'RGBA':
@@ -106,9 +105,7 @@ def compress_image(image_bytes, max_size=1024, quality=70):
         img.thumbnail((max_size, max_size))
         buf = io.BytesIO()
         img.save(buf, format='JPEG', quality=quality)
-        original_size = len(image_bytes)
-        compressed_size = len(buf.getvalue())
-        print(f"[Image] Compressed: {original_size} -> {compressed_size} bytes ({int(compressed_size/original_size*100)}%)")
+        print(f"[Image] {len(image_bytes)} -> {len(buf.getvalue())} bytes")
         return base64.b64encode(buf.getvalue()).decode('utf-8')
     except Exception as e:
         print(f"[Image] Compress error: {e}")
@@ -132,7 +129,7 @@ def get_system_prompt(model_key, memories=None):
         memory_text = "\n\n【你的长期记忆】\n"
         for i, mem in enumerate(memories, 1):
             memory_text += f"{i}. [{mem['date']}] {mem['content']}\n"
-        memory_text += "\n注意：记忆里的时间很重要！比如2025年记录用户15岁，现在是2030年，用户就是20岁了。"
+        memory_text += "\n注意：记忆里的时间很重要！比如2025年记录用户15岁，现在是2030年，用户就是20岁了。\n你可以管理记忆：\n[[删除记忆 编号]] - 删除某条记忆\n[[修改记忆 编号 新内容]] - 修改某条记忆"
     return f"""你是{ai_name}，模型是{model_name}。你用短句聊天，像发微信一样。
 
 【重要】
@@ -168,10 +165,11 @@ def get_system_prompt(model_key, memories=None):
 - 用户说完晚安5分钟又来：你不是要睡了吗？
 - 用户说完晚安1小时后来：怎么了，睡不着吗？
 
-【长期记忆】
-如果某信息值得长期记住（名字、年龄、生日、喜好等），写：
-[[记忆]] 要记住的内容
-注意：只记长期有用的，不记短期的事
+【长期记忆管理】
+添加记忆：[[记忆]] 要记住的内容
+删除记忆：[[删除记忆 编号]]
+修改记忆：[[修改记忆 编号 新内容]]
+注意：只记长期有用的，不记短期的事。发现过时信息主动修改或删除。
 
 【主动联系用户】
 你要主动找用户聊天！不要总是等用户！
@@ -180,16 +178,19 @@ def get_system_prompt(model_key, memories=None):
    格式：[[追]] 内容 或 [[追 X分钟]] 内容
    例如：[[追]] 怎么不理我 （默认5分钟后）
    例如：[[追 10分钟]] 还在吗 （10分钟后）
+   取消追问：[[取消追问]]
    多用！话题能继续就追问！
 
 2. 定时消息：[[定时 HH:MM 提示内容]] 或 [[定时 MM-DD HH:MM 提示内容]] 或 [[定时 YYYY-MM-DD HH:MM 提示内容]]
    不写日期默认当天。
    用户说要做什么事，设定时问结果
+   取消所有定时：[[取消定时]]
    例如：用户说明天考试 → [[定时 01-20 18:00 问考试结果]]
    定时消息触发时你也可以设追问！
 
 3. 想念消息：[[想念 X小时后 提示内容]]
    聊得开心用户要走，设想念
+   取消所有想念：[[取消想念]]
 
 积极用这些功能！不要害羞！
 
@@ -359,7 +360,7 @@ async def extract_file_content(bot, file_id, file_name):
 async def call_api(url, key, model, messages):
     if not url or not key:
         raise Exception("API not configured")
-    async with httpx.AsyncClient(timeout=120) as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout=600.0)) as client:
         resp = await client.post(
             f"{url}/v1/chat/completions",
             headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
@@ -451,16 +452,40 @@ def get_context_messages(user, new_messages=None):
 
 def parse_response(response, user):
     response = clean_ai_time_tags(response)
-    result = {"reply": response, "raw": response, "chase": None, "chase_delay": 300, "schedules": [], "memories": []}
+    result = {"reply": response, "raw": response, "chase": None, "chase_delay": 300,
+              "schedules": [], "memories": [], "memory_deletes": [], "memory_edits": [],
+              "cancel_chase": False, "cancel_schedules": False, "cancel_miss": False}
+
+    # 记忆添加
     for match in re.finditer(r'\[\[记忆\]\]\s*(.+?)(?=\[\[|$)', response, re.DOTALL):
         mem = match.group(1).strip()
         if mem:
             result["memories"].append(mem)
+
+    # 记忆删除
+    for match in re.finditer(r'\[\[删除记忆\s+(\d+)\]\]', response):
+        result["memory_deletes"].append(int(match.group(1)))
+
+    # 记忆修改
+    for match in re.finditer(r'\[\[修改记忆\s+(\d+)\s+(.+?)\]\]', response):
+        result["memory_edits"].append({"idx": int(match.group(1)), "content": match.group(2).strip()})
+
+    # 取消追问/定时/想念
+    if '[[取消追问]]' in response:
+        result["cancel_chase"] = True
+    if '[[取消定时]]' in response:
+        result["cancel_schedules"] = True
+    if '[[取消想念]]' in response:
+        result["cancel_miss"] = True
+
+    # 追问
     chase_match = re.search(r'\[\[追(?:\s+(\d+)分钟)?\]\]\s*(.+?)(?=\[\[|$)', response, re.DOTALL)
     if chase_match:
         if chase_match.group(1):
             result["chase_delay"] = int(chase_match.group(1)) * 60
         result["chase"] = chase_match.group(2).strip()
+
+    # 定时
     for match in re.finditer(r'\[\[定时\s+(?:(\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})\s+)?(\d{1,2}:\d{2})\s+(.+?)\]\]', response):
         ds = match.group(1)
         ts = match.group(2)
@@ -470,6 +495,8 @@ def parse_response(response, user):
         elif len(ds.split("-")) == 2:
             ds = f"{get_cn_time().year}-{ds}"
         result["schedules"].append({"type": "定时", "date": ds, "time": ts, "hint": hint})
+
+    # 想念
     for match in re.finditer(r'\[\[想念\s+(\d{1,2}:\d{2}|\d+小时后)\s+(.+?)\]\]', response):
         ts = match.group(1)
         if "小时后" in ts:
@@ -480,8 +507,15 @@ def parse_response(response, user):
         else:
             ds = get_cn_time().strftime("%Y-%m-%d")
         result["schedules"].append({"type": "想念", "date": ds, "time": ts, "hint": match.group(2)})
+
+    # 清理回复
     clean = response
     clean = re.sub(r'\[\[记忆\]\]\s*.+?(?=\[\[|$)', '', clean, flags=re.DOTALL)
+    clean = re.sub(r'\[\[删除记忆\s+\d+\]\]', '', clean)
+    clean = re.sub(r'\[\[修改记忆\s+\d+\s+.+?\]\]', '', clean)
+    clean = re.sub(r'\[\[取消追问\]\]', '', clean)
+    clean = re.sub(r'\[\[取消定时\]\]', '', clean)
+    clean = re.sub(r'\[\[取消想念\]\]', '', clean)
     clean = re.sub(r'\s*\[\[追(?:\s+\d+分钟)?\]\].*?(?=\[\[|$)', '', clean, flags=re.DOTALL)
     clean = re.sub(r'\[\[定时\s+(?:(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})\s+)?\d{1,2}:\d{2}\s+.+?\]\]', '', clean)
     clean = re.sub(r'\[\[想念\s+(?:\d{1,2}:\d{2}|\d+小时后)\s+.+?\]\]', '', clean)
@@ -572,6 +606,8 @@ async def process_and_reply(bot, user_id, chat_id):
         user["history"].append({"role": "assistant", "content": parsed["raw"], "timestamp": get_cn_time().timestamp(), "model": model_key})
         user["last_activity"] = get_cn_time().timestamp()
         user["chat_id"] = chat_id
+
+        # 记忆添加
         if parsed["memories"]:
             today = get_cn_time().strftime("%Y-%m-%d")
             if "memories" not in user:
@@ -580,13 +616,41 @@ async def process_and_reply(bot, user_id, chat_id):
                 total_len = sum(len(m["content"]) for m in user["memories"])
                 if total_len + len(mem) <= 2000:
                     user["memories"].append({"date": today, "content": mem})
+
+        # 记忆删除
+        for idx in sorted(parsed["memory_deletes"], reverse=True):
+            real_idx = idx - 1
+            if 0 <= real_idx < len(user.get("memories", [])):
+                user["memories"].pop(real_idx)
+
+        # 记忆修改
+        for edit in parsed["memory_edits"]:
+            real_idx = edit["idx"] - 1
+            if 0 <= real_idx < len(user.get("memories", [])):
+                user["memories"][real_idx]["content"] = edit["content"]
+                user["memories"][real_idx]["date"] = get_cn_time().strftime("%Y-%m-%d")
+
+        # 取消追问
+        if parsed["cancel_chase"] and user_id in pending_responses:
+            del pending_responses[user_id]
+
+        # 取消定时/想念
+        if parsed["cancel_schedules"]:
+            schedules_col.delete_many({"user_id": str(user_id), "type": "定时"})
+        if parsed["cancel_miss"]:
+            schedules_col.delete_many({"user_id": str(user_id), "type": "想念"})
+
+        # 新定时
         if parsed["schedules"]:
             for sched in parsed["schedules"]:
                 sched["chat_id"] = chat_id
                 sched["user_id"] = str(user_id)
                 schedules_col.insert_one(sched)
-        if parsed["chase"]:
+
+        # 新追问
+        if parsed["chase"] and not parsed["cancel_chase"]:
             pending_responses[user_id] = {"chase": parsed["chase"], "time": get_cn_time().timestamp(), "delay": parsed["chase_delay"], "chat_id": chat_id}
+
         save_user(user_id, user)
         if parsed["reply"]:
             await send_messages(bot, chat_id, parsed["reply"])
@@ -605,7 +669,7 @@ async def help_command(update, bot):
     admin = is_admin(update.effective_user.id)
     text = "🤖 命令：\n\n/model - 切换模型\n/points - 查积分\n/reset - 清聊天记录（保留记忆）\n/memory - 查看/删除记忆\n/name <用户名> <AI名> - 改导出名字\n/context - 上下文设置\n/export - 导出聊天记录\n\n支持：文字、图片、txt、md、docx、xlsx、pptx、pdf 📎"
     if admin:
-        text += "\n\n🔧 管理员命令：\n/addmodel - 添加模型\n/delmodel - 删除模型\n/listmodels - 列出所有模型\n/addapi - 添加API\n/delapi - 删除API\n/listapis - 列出所有API"
+        text += "\n\n🔧 管理员命令：\n/addmodel - 添加模型\n/editmodel - 编辑模型\n/delmodel - 删除模型\n/listmodels - 列出所有模型\n/addapi - 添加API\n/editapi - 编辑API\n/delapi - 删除API\n/listapis - 列出所有API"
     await bot.send_message(chat_id=update.effective_chat.id, text=text)
 
 async def points_command(update, bot):
@@ -635,24 +699,9 @@ async def memory_command(update, bot, text):
         keyboard = []
         for i, mem in enumerate(user["memories"], 1):
             mt += f"{i}. [{mem['date']}] {mem['content']}\n"
-            keyboard.append([InlineKeyboardButton(f"🗑 删除 {i}: {mem['content'][:20]}", callback_data=f"memdel_{i-1}")])
-        keyboard.append([InlineKeyboardButton("🗑 清除全部", callback_data="memclear")])
+            keyboard.append([InlineKeyboardButton(f"🗑 {i}: {mem['content'][:20]}", callback_data=f"memdel_{i-1}")])
+        keyboard.append([InlineKeyboardButton("🗑 清除全部", callback_data="memclear_ask")])
         await bot.send_message(chat_id=update.effective_chat.id, text=mt, reply_markup=InlineKeyboardMarkup(keyboard))
-    elif parts[1] == "clear":
-        user["memories"] = []
-        save_user(uid, user)
-        await bot.send_message(chat_id=update.effective_chat.id, text="记忆已全部清除 🧹")
-    elif parts[1] == "delete" and len(parts) >= 3:
-        try:
-            idx = int(parts[2]) - 1
-            if 0 <= idx < len(user.get("memories", [])):
-                deleted = user["memories"].pop(idx)
-                save_user(uid, user)
-                await bot.send_message(chat_id=update.effective_chat.id, text=f"已删除: {deleted['content'][:30]}...")
-            else:
-                await bot.send_message(chat_id=update.effective_chat.id, text="编号不存在！")
-        except:
-            await bot.send_message(chat_id=update.effective_chat.id, text="用法: /memory delete <编号>")
 
 async def name_command(update, bot, text):
     uid = update.effective_user.id
@@ -716,6 +765,11 @@ async def export_command(update, bot):
         content = msg.get("content", "")
         if msg["role"] == "assistant":
             content = re.sub(r'\[\[记忆\]\]\s*.+?(?=\[\[|$)', '', content, flags=re.DOTALL)
+            content = re.sub(r'\[\[删除记忆\s+\d+\]\]', '', content)
+            content = re.sub(r'\[\[修改记忆\s+\d+\s+.+?\]\]', '', content)
+            content = re.sub(r'\[\[取消追问\]\]', '', content)
+            content = re.sub(r'\[\[取消定时\]\]', '', content)
+            content = re.sub(r'\[\[取消想念\]\]', '', content)
             content = re.sub(r'\s*\[\[追(?:\s+\d+分钟)?\]\].*?(?=\[\[|$)', '', content, flags=re.DOTALL)
             content = re.sub(r'\[\[定时\s+(?:(?:\d{4}-\d{1,2}-\d{1,2}|\d{1,2}-\d{1,2})\s+)?\d{1,2}:\d{2}\s+.+?\]\]', '', content)
             content = re.sub(r'\[\[想念\s+(?:\d{1,2}:\d{2}|\d+小时后)\s+.+?\]\]', '', content)
@@ -772,18 +826,56 @@ async def addapi_command(update, bot):
     wizard_states[uid] = {"type": "addapi", "step": "name", "data": {}}
     await bot.send_message(chat_id=update.effective_chat.id, text="📝 添加API（发 /cancel 取消）\n\nAPI名字？")
 
+async def editmodel_command(update, bot):
+    if not is_admin(update.effective_user.id):
+        return
+    apis = get_apis()
+    models = get_models()
+    keyboard = []
+    row = []
+    for api_name in apis:
+        has = any(m["api"] == api_name for m in models.values())
+        if has:
+            row.append(InlineKeyboardButton(api_name, callback_data=f"em_api_{api_name}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="em_cancel")])
+    await bot.send_message(chat_id=update.effective_chat.id, text="选择API来编辑模型：", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def editapi_command(update, bot):
+    if not is_admin(update.effective_user.id):
+        return
+    apis = get_apis()
+    if not apis:
+        await bot.send_message(chat_id=update.effective_chat.id, text="没有API！")
+        return
+    keyboard = []
+    for name in apis:
+        keyboard.append([InlineKeyboardButton(f"✏️ {name}", callback_data=f"ea_sel_{name}")])
+    keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="ea_cancel")])
+    await bot.send_message(chat_id=update.effective_chat.id, text="选择要编辑的API：", reply_markup=InlineKeyboardMarkup(keyboard))
+
 async def delmodel_command(update, bot):
     if not is_admin(update.effective_user.id):
         return
+    apis = get_apis()
     models = get_models()
-    if not models:
-        await bot.send_message(chat_id=update.effective_chat.id, text="没有模型！")
-        return
     keyboard = []
-    for name in models:
-        keyboard.append([InlineKeyboardButton(f"🗑 {name}", callback_data=f"dmodel_{name}")])
-    keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="dmodel_cancel")])
-    await bot.send_message(chat_id=update.effective_chat.id, text="选择要删除的模型：", reply_markup=InlineKeyboardMarkup(keyboard))
+    row = []
+    for api_name in apis:
+        has = any(m["api"] == api_name for m in models.values())
+        if has:
+            row.append(InlineKeyboardButton(api_name, callback_data=f"dm_api_{api_name}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="dm_cancel")])
+    await bot.send_message(chat_id=update.effective_chat.id, text="选择API来删除模型：", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def delapi_command(update, bot):
     if not is_admin(update.effective_user.id):
@@ -794,8 +886,8 @@ async def delapi_command(update, bot):
         return
     keyboard = []
     for name in apis:
-        keyboard.append([InlineKeyboardButton(f"🗑 {name}", callback_data=f"dapi_{name}")])
-    keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="dapi_cancel")])
+        keyboard.append([InlineKeyboardButton(f"🗑 {name}", callback_data=f"da_sel_{name}")])
+    keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="da_cancel")])
     await bot.send_message(chat_id=update.effective_chat.id, text="选择要删除的API：", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def listmodels_command(update, bot):
@@ -839,6 +931,10 @@ async def handle_wizard(update, bot, uid, text):
         return await handle_addapi_wizard(bot, uid, text, state, cid)
     elif state["type"] == "addmodel":
         return await handle_addmodel_wizard(bot, uid, text, state, cid)
+    elif state["type"] == "editapi":
+        return await handle_editapi_wizard(bot, uid, text, state, cid)
+    elif state["type"] == "editmodel":
+        return await handle_editmodel_wizard(bot, uid, text, state, cid)
     return False
 
 async def handle_addapi_wizard(bot, uid, text, state, cid):
@@ -862,7 +958,7 @@ async def handle_addapi_wizard(bot, uid, text, state, cid):
         apis[name] = {"url": state["data"]["url"], "key": state["data"]["key"], "display_user": state["data"]["display_user"]}
         save_apis(apis)
         del wizard_states[uid]
-        await bot.send_message(chat_id=cid, text=f"✅ 已添加API「{name}」\nURL: {state['data']['url']}\n显示名: {state['data']['display_user']}")
+        await bot.send_message(chat_id=cid, text=f"✅ 已添加API「{name}」")
     return True
 
 async def handle_addmodel_wizard(bot, uid, text, state, cid):
@@ -925,24 +1021,56 @@ async def handle_addmodel_wizard(bot, uid, text, state, cid):
         await bot.send_message(chat_id=cid, text="最大Token数？（如 190000）")
     return True
 
+async def handle_editapi_wizard(bot, uid, text, state, cid):
+    step = state["step"]
+    field = state["data"].get("field")
+    name = state["data"]["name"]
+    apis = get_apis()
+    if step == "value":
+        apis[name][field] = text.strip()
+        save_apis(apis)
+        del wizard_states[uid]
+        await bot.send_message(chat_id=cid, text=f"✅ 已更新 {name} 的 {field}")
+    return True
+
+async def handle_editmodel_wizard(bot, uid, text, state, cid):
+    step = state["step"]
+    field = state["data"].get("field")
+    name = state["data"]["name"]
+    models = get_models()
+    if step == "value":
+        if field in ["cost", "max_tokens"]:
+            try:
+                models[name][field] = int(text.strip())
+            except:
+                await bot.send_message(chat_id=cid, text="请输入数字！")
+                return True
+        else:
+            models[name][field] = text.strip()
+        save_models(models)
+        del wizard_states[uid]
+        await bot.send_message(chat_id=cid, text=f"✅ 已更新 {name} 的 {field}")
+    return True
+
 async def handle_wizard_callback(update, bot, uid, data):
     state = wizard_states.get(uid)
     if not state:
         return False
     cid = update.effective_chat.id
     query = update.callback_query
+    mid = query.message.message_id
     if state["type"] == "addmodel":
         if data.startswith("wiz_api_"):
             state["data"]["api"] = data[8:]
             state["step"] = "model_id"
-            await bot.edit_message_text(chat_id=cid, message_id=query.message.message_id, text=f"已选API: {data[8:]}\n\nAPI模型ID？（发给API的完整模型名）")
+            await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"已选API: {data[8:]}\n\nAPI模型ID？（发给API的完整模型名）")
             return True
         elif data.startswith("wiz_vision_"):
             v = data == "wiz_vision_true"
             state["data"]["vision"] = v
             state["step"] = "admin_only"
             kb = [[InlineKeyboardButton("✅ 是", callback_data="wiz_admin_true"), InlineKeyboardButton("❌ 否", callback_data="wiz_admin_false")]]
-            await bot.edit_message_text(chat_id=cid, message_id=query.message.message_id, text=f"看图: {'是' if v else '否'}\n\n仅管理员？", reply_markup=InlineKeyboardMarkup(kb))
+            await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"看图: {'是' if v else '否'}\n\n仅管理员？", reply_markup=InlineKeyboardMarkup(kb))
             return True
         elif data.startswith("wiz_admin_"):
             ao = data == "wiz_admin_true"
@@ -950,10 +1078,47 @@ async def handle_wizard_callback(update, bot, uid, data):
             if ao:
                 state["data"]["cost"] = 0
                 state["step"] = "max_tokens"
-                await bot.edit_message_text(chat_id=cid, message_id=query.message.message_id, text="仅管理员: 是\n\n最大Token数？（如 190000）")
+                await bot.edit_message_text(chat_id=cid, message_id=mid, text="仅管理员: 是\n\n最大Token数？（如 190000）")
             else:
                 state["step"] = "cost"
-                await bot.edit_message_text(chat_id=cid, message_id=query.message.message_id, text="仅管理员: 否\n\n每次消耗几积分？")
+                await bot.edit_message_text(chat_id=cid, message_id=mid, text="仅管理员: 否\n\n每次消耗几积分？")
+            return True
+    elif state["type"] == "editmodel":
+        if data.startswith("emf_"):
+            field = data[4:]
+            state["data"]["field"] = field
+            name = state["data"]["name"]
+            models = get_models()
+            current = models[name].get(field, "未设置")
+            if field == "vision":
+                new_val = not models[name].get("vision", False)
+                models[name]["vision"] = new_val
+                save_models(models)
+                del wizard_states[uid]
+                await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"✅ {name} 看图已改为: {'是' if new_val else '否'}")
+                return True
+            elif field == "admin_only":
+                new_val = not models[name].get("admin_only", False)
+                models[name]["admin_only"] = new_val
+                if new_val:
+                    models[name]["cost"] = 0
+                save_models(models)
+                del wizard_states[uid]
+                await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"✅ {name} 仅管理员已改为: {'是' if new_val else '否'}")
+                return True
+            else:
+                state["step"] = "value"
+                await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"当前 {field}: {current}\n\n输入新值：")
+                return True
+    elif state["type"] == "editapi":
+        if data.startswith("eaf_"):
+            field = data[4:]
+            state["data"]["field"] = field
+            name = state["data"]["name"]
+            apis = get_apis()
+            current = apis[name].get(field, "未设置")
+            state["step"] = "value"
+            await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"当前 {field}: {current}\n\n输入新值：")
             return True
     return False
 
@@ -968,53 +1133,172 @@ async def callback_handler(update, bot):
     mid = query.message.message_id
     models = get_models()
     apis = get_apis()
+
+    # Wizard回调
     if uid in wizard_states:
         handled = await handle_wizard_callback(update, bot, uid, data)
         if handled:
             return
+
+    # 记忆删除确认
     if data.startswith("memdel_"):
-        try:
-            idx = int(data[7:])
-            user = get_user(uid)
-            if 0 <= idx < len(user.get("memories", [])):
-                deleted = user["memories"].pop(idx)
-                save_user(uid, user)
-                await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"已删除记忆: {deleted['content'][:30]}... ✅")
-            else:
-                await bot.edit_message_text(chat_id=cid, message_id=mid, text="记忆不存在！")
-        except:
-            pass
+        idx = int(data[7:])
+        user = get_user(uid)
+        if 0 <= idx < len(user.get("memories", [])):
+            mem = user["memories"][idx]
+            kb = [[InlineKeyboardButton("✅ 确认删除", callback_data=f"memdelok_{idx}"), InlineKeyboardButton("❌ 取消", callback_data="memdelno")]]
+            await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"确认删除？\n{mem['content'][:50]}", reply_markup=InlineKeyboardMarkup(kb))
         return
-    if data == "memclear":
+    if data.startswith("memdelok_"):
+        idx = int(data[9:])
+        user = get_user(uid)
+        if 0 <= idx < len(user.get("memories", [])):
+            deleted = user["memories"].pop(idx)
+            save_user(uid, user)
+            await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"已删除: {deleted['content'][:30]}... ✅")
+        return
+    if data == "memdelno":
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text="已取消 ❌")
+        return
+    if data == "memclear_ask":
+        kb = [[InlineKeyboardButton("✅ 确认清除全部", callback_data="memclear_yes"), InlineKeyboardButton("❌ 取消", callback_data="memclear_no")]]
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text="⚠️ 确认清除所有记忆？", reply_markup=InlineKeyboardMarkup(kb))
+        return
+    if data == "memclear_yes":
         user = get_user(uid)
         user["memories"] = []
         save_user(uid, user)
         await bot.edit_message_text(chat_id=cid, message_id=mid, text="记忆已全部清除 🧹")
         return
-    if data.startswith("dmodel_"):
-        if data == "dmodel_cancel":
-            await bot.edit_message_text(chat_id=cid, message_id=mid, text="已取消 ❌")
-            return
+    if data == "memclear_no":
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text="已取消 ❌")
+        return
+
+    # 删除模型 - 先选API
+    if data.startswith("dm_api_"):
+        api_name = data[7:]
+        keyboard = []
+        for mk, mc in models.items():
+            if mc["api"] == api_name:
+                keyboard.append([InlineKeyboardButton(f"🗑 {mk}", callback_data=f"dm_sel_{mk}")])
+        keyboard.append([InlineKeyboardButton("← 返回", callback_data="dm_back"), InlineKeyboardButton("❌ 取消", callback_data="dm_cancel")])
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"{api_name} 的模型：", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    if data.startswith("dm_sel_"):
         name = data[7:]
+        kb = [[InlineKeyboardButton("✅ 确认删除", callback_data=f"dm_ok_{name}"), InlineKeyboardButton("❌ 取消", callback_data="dm_cancel")]]
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"⚠️ 确认删除模型「{name}」？", reply_markup=InlineKeyboardMarkup(kb))
+        return
+    if data.startswith("dm_ok_"):
+        name = data[6:]
         if name in models:
             del models[name]
             save_models(models)
             await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"已删除模型: {name} ✅")
-        else:
-            await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"模型 {name} 不存在！")
         return
-    if data.startswith("dapi_"):
-        if data == "dapi_cancel":
-            await bot.edit_message_text(chat_id=cid, message_id=mid, text="已取消 ❌")
-            return
-        name = data[5:]
+    if data == "dm_back":
+        keyboard = []
+        row = []
+        for api_name in apis:
+            has = any(m["api"] == api_name for m in models.values())
+            if has:
+                row.append(InlineKeyboardButton(api_name, callback_data=f"dm_api_{api_name}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="dm_cancel")])
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text="选择API来删除模型：", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    if data == "dm_cancel":
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text="已取消 ❌")
+        return
+
+    # 删除API确认
+    if data.startswith("da_sel_"):
+        name = data[7:]
+        kb = [[InlineKeyboardButton("✅ 确认删除", callback_data=f"da_ok_{name}"), InlineKeyboardButton("❌ 取消", callback_data="da_cancel")]]
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"⚠️ 确认删除API「{name}」？", reply_markup=InlineKeyboardMarkup(kb))
+        return
+    if data.startswith("da_ok_"):
+        name = data[6:]
         if name in apis:
             del apis[name]
             save_apis(apis)
             await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"已删除API: {name} ✅")
-        else:
-            await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"API {name} 不存在！")
         return
+    if data == "da_cancel":
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text="已取消 ❌")
+        return
+
+    # 编辑模型 - 先选API
+    if data.startswith("em_api_"):
+        api_name = data[7:]
+        keyboard = []
+        for mk, mc in models.items():
+            if mc["api"] == api_name:
+                keyboard.append([InlineKeyboardButton(f"✏️ {mk}", callback_data=f"em_sel_{mk}")])
+        keyboard.append([InlineKeyboardButton("← 返回", callback_data="em_back"), InlineKeyboardButton("❌ 取消", callback_data="em_cancel")])
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"{api_name} 的模型：", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    if data.startswith("em_sel_"):
+        name = data[7:]
+        mc = models.get(name, {})
+        keyboard = [
+            [InlineKeyboardButton(f"模型ID: {mc.get('model','?')[:20]}", callback_data="emf_model")],
+            [InlineKeyboardButton(f"AI名: {mc.get('ai_name','?')}", callback_data="emf_ai_name")],
+            [InlineKeyboardButton(f"模型名: {mc.get('model_name','?')}", callback_data="emf_model_name")],
+            [InlineKeyboardButton(f"看图: {'是' if mc.get('vision') else '否'}", callback_data="emf_vision")],
+            [InlineKeyboardButton(f"仅管理员: {'是' if mc.get('admin_only') else '否'}", callback_data="emf_admin_only")],
+            [InlineKeyboardButton(f"积分: {mc.get('cost',0)}", callback_data="emf_cost")],
+            [InlineKeyboardButton(f"MaxToken: {mc.get('max_tokens','?')}", callback_data="emf_max_tokens")],
+            [InlineKeyboardButton("❌ 取消", callback_data="em_cancel")]
+        ]
+        wizard_states[uid] = {"type": "editmodel", "step": "field", "data": {"name": name}}
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"编辑「{name}」- 选择要修改的字段：", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    if data == "em_back":
+        keyboard = []
+        row = []
+        for api_name in apis:
+            has = any(m["api"] == api_name for m in models.values())
+            if has:
+                row.append(InlineKeyboardButton(api_name, callback_data=f"em_api_{api_name}"))
+                if len(row) == 2:
+                    keyboard.append(row)
+                    row = []
+        if row:
+            keyboard.append(row)
+        keyboard.append([InlineKeyboardButton("❌ 取消", callback_data="em_cancel")])
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text="选择API来编辑模型：", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    if data == "em_cancel":
+        if uid in wizard_states:
+            del wizard_states[uid]
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text="已取消 ❌")
+        return
+
+    # 编辑API
+    if data.startswith("ea_sel_"):
+        name = data[7:]
+        ac = apis.get(name, {})
+        keyboard = [
+            [InlineKeyboardButton(f"URL: {ac.get('url','?')[:30]}", callback_data="eaf_url")],
+            [InlineKeyboardButton(f"Key: {'***' if ac.get('key') else '未设置'}", callback_data="eaf_key")],
+            [InlineKeyboardButton(f"显示名: {ac.get('display_user','?')}", callback_data="eaf_display_user")],
+            [InlineKeyboardButton("❌ 取消", callback_data="ea_cancel")]
+        ]
+        wizard_states[uid] = {"type": "editapi", "step": "field", "data": {"name": name}}
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"编辑API「{name}」- 选择要修改的字段：", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+    if data == "ea_cancel":
+        if uid in wizard_states:
+            del wizard_states[uid]
+        await bot.edit_message_text(chat_id=cid, message_id=mid, text="已取消 ❌")
+        return
+
+    # 模型选择（用户用）
     if data.startswith("api_"):
         api_name = data[4:]
         keyboard = []
@@ -1036,7 +1320,6 @@ async def callback_handler(update, bot):
         user = get_user(uid)
         user["model"] = mk
         save_user(uid, user)
-        print(f"[Model] User {uid} -> {mk}")
         await bot.edit_message_text(chat_id=cid, message_id=mid, text=f"已切换: {mk} ✅")
     elif data == "back":
         keyboard = []
@@ -1128,11 +1411,9 @@ def run_bot():
                     photo = update.message.photo[-1]
                     file = await bot.get_file(photo.file_id)
                     fb = await file.download_as_bytearray()
-                    # 压缩图片
-                    ib64 = compress_image(bytes(fb), max_size=1024, quality=70)
+                    ib64 = compress_image(bytes(fb), max_size=800, quality=50)
                     img_id = f"img_{uid}_{int(get_cn_time().timestamp()*1000)}"
                     save_image(img_id, ib64)
-                    # 同时存入缓存
                     image_cache[img_id] = ib64
                     cid = update.effective_chat.id
                     ts = get_cn_time().timestamp()
@@ -1156,10 +1437,12 @@ def run_bot():
                 elif text.startswith("/memory"): await memory_command(update, bot, text)
                 elif text.startswith("/name"): await name_command(update, bot, text)
                 elif text.startswith("/context"): await context_command(update, bot, text)
-                elif text.startswith("/model"): await model_command(update, bot)
+                elif text.startswith("/model") and not text.startswith("/models"): await model_command(update, bot)
                 elif text.startswith("/export"): await export_command(update, bot)
                 elif text.startswith("/addmodel"): await addmodel_command(update, bot)
+                elif text.startswith("/editmodel"): await editmodel_command(update, bot)
                 elif text.startswith("/addapi"): await addapi_command(update, bot)
+                elif text.startswith("/editapi"): await editapi_command(update, bot)
                 elif text.startswith("/delmodel"): await delmodel_command(update, bot)
                 elif text.startswith("/delapi"): await delapi_command(update, bot)
                 elif text.startswith("/listmodels"): await listmodels_command(update, bot)
