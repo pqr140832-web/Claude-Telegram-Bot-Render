@@ -13,6 +13,7 @@ from telegram import Update, Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.request import HTTPXRequest
 import httpx
 from pymongo import MongoClient
+from PIL import Image
 
 # ============== 时区 ==============
 
@@ -85,9 +86,33 @@ def save_image(image_id, base64_data):
     images_col.update_one({"_id": image_id}, {"$set": {"data": base64_data, "created": get_cn_time().timestamp()}}, upsert=True)
     return image_id
 
+image_cache = {}
+
 def get_image(image_id):
+    if image_id in image_cache:
+        return image_cache[image_id]
     doc = images_col.find_one({"_id": image_id})
-    return doc["data"] if doc else None
+    if doc:
+        image_cache[image_id] = doc["data"]
+        return doc["data"]
+    return None
+
+def compress_image(image_bytes, max_size=1024, quality=70):
+    """压缩图片，返回base64"""
+    try:
+        img = Image.open(io.BytesIO(image_bytes))
+        if img.mode == 'RGBA':
+            img = img.convert('RGB')
+        img.thumbnail((max_size, max_size))
+        buf = io.BytesIO()
+        img.save(buf, format='JPEG', quality=quality)
+        original_size = len(image_bytes)
+        compressed_size = len(buf.getvalue())
+        print(f"[Image] Compressed: {original_size} -> {compressed_size} bytes ({int(compressed_size/original_size*100)}%)")
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    except Exception as e:
+        print(f"[Image] Compress error: {e}")
+        return base64.b64encode(image_bytes).decode('utf-8')
 
 # ============== 配置 ==============
 
@@ -401,11 +426,15 @@ def get_context_messages(user, new_messages=None):
             if tc:
                 parts.append({"type": "text", "text": tc})
             for img_id in msg["image_ids"]:
-                ib = get_image(img_id)
-                if ib:
-                    parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ib}"}})
-                else:
-                    print(f"[DEBUG] Image not found in DB: {img_id}")
+                try:
+                    ib = get_image(img_id)
+                    if ib:
+                        parts.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{ib}"}})
+                    else:
+                        parts.append({"type": "text", "text": "[图片已失效]"})
+                except Exception as e:
+                    print(f"[Image] Load error: {e}")
+                    parts.append({"type": "text", "text": "[图片加载失败]"})
             formatted.append({"role": role, "content": parts if parts else tc})
         elif role == "assistant":
             c = clean_ai_time_tags(content) if isinstance(content, str) else content
@@ -423,7 +452,7 @@ def get_context_messages(user, new_messages=None):
 def parse_response(response, user):
     response = clean_ai_time_tags(response)
     result = {"reply": response, "raw": response, "chase": None, "chase_delay": 300, "schedules": [], "memories": []}
-    for match in re.finditer(r'\[\[记���\]\]\s*(.+?)(?=\[\[|$)', response, re.DOTALL):
+    for match in re.finditer(r'\[\[记忆\]\]\s*(.+?)(?=\[\[|$)', response, re.DOTALL):
         mem = match.group(1).strip()
         if mem:
             result["memories"].append(mem)
@@ -535,29 +564,10 @@ async def process_and_reply(bot, user_id, chat_id):
     messages = get_context_messages(user, [new_msg])
     try:
         await bot.send_chat_action(chat_id=chat_id, action="typing")
-        print(f"[DEBUG] Calling model: {model_key}")
-        print(f"[DEBUG] Has images: {has_image}, Image IDs: {image_ids}")
-        print(f"[DEBUG] Messages count: {len(messages)}")
-        # 打印每条消息的类型和大小
-        for i, msg in enumerate(messages):
-            content = msg.get("content", "")
-            if isinstance(content, list):
-                types = [item.get("type", "?") for item in content]
-                sizes = []
-                for item in content:
-                    if item.get("type") == "text":
-                        sizes.append(f"text:{len(item['text'])}")
-                    elif item.get("type") == "image_url":
-                        url_len = len(item.get("image_url", {}).get("url", ""))
-                        sizes.append(f"img:{url_len}")
-                print(f"[DEBUG] msg[{i}] role={msg['role']} types={types} sizes={sizes}")
-            else:
-                print(f"[DEBUG] msg[{i}] role={msg['role']} len={len(str(content))}")
+        print(f"[DEBUG] Model: {model_key}, Images: {has_image}, MsgCount: {len(messages)}")
         response = await call_main_model(model_key, messages, user)
-        print(f"[DEBUG] Response received, len={len(response)}")
-        print(f"[DEBUG] Response preview: {response[:200]}")
+        print(f"[DEBUG] Response len={len(response)}: {response[:100]}")
         parsed = parse_response(response, user)
-        print(f"[DEBUG] Parsed reply: {parsed['reply'][:200]}")
         user["history"].append(new_msg)
         user["history"].append({"role": "assistant", "content": parsed["raw"], "timestamp": get_cn_time().timestamp(), "model": model_key})
         user["last_activity"] = get_cn_time().timestamp()
@@ -649,7 +659,7 @@ async def name_command(update, bot, text):
     user = get_user(uid)
     parts = text.split()
     if len(parts) == 1:
-        await bot.send_message(chat_id=update.effective_chat.id, text=f"当前名字：\n用户: {user.get('user_name','���户')}\nAI: {user.get('ai_name','AI')}\n\n修改: /name <用户名> <AI名>")
+        await bot.send_message(chat_id=update.effective_chat.id, text=f"当前名字：\n用户: {user.get('user_name','用户')}\nAI: {user.get('ai_name','AI')}\n\n修改: /name <用户名> <AI名>")
     elif len(parts) >= 3:
         user["user_name"] = parts[1]
         user["ai_name"] = parts[2]
@@ -1118,10 +1128,12 @@ def run_bot():
                     photo = update.message.photo[-1]
                     file = await bot.get_file(photo.file_id)
                     fb = await file.download_as_bytearray()
-                    ib64 = base64.b64encode(bytes(fb)).decode('utf-8')
+                    # 压缩图片
+                    ib64 = compress_image(bytes(fb), max_size=1024, quality=70)
                     img_id = f"img_{uid}_{int(get_cn_time().timestamp()*1000)}"
                     save_image(img_id, ib64)
-                    print(f"[DEBUG] Image saved: {img_id}, size: {len(ib64)}")
+                    # 同时存入缓存
+                    image_cache[img_id] = ib64
                     cid = update.effective_chat.id
                     ts = get_cn_time().timestamp()
                     if uid in pending_responses:
