@@ -1411,7 +1411,7 @@ def run_bot():
                     photo = update.message.photo[-1]
                     file = await bot.get_file(photo.file_id)
                     fb = await file.download_as_bytearray()
-                    ib64 = compress_image(bytes(fb), max_size=800, quality=50)
+                    ib64 = compress_image(bytes(fb), max_size=1200, quality=75)
                     img_id = f"img_{uid}_{int(get_cn_time().timestamp()*1000)}"
                     save_image(img_id, ib64)
                     image_cache[img_id] = ib64
