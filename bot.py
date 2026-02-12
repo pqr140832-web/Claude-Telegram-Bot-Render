@@ -17,7 +17,7 @@ from PIL import Image
 
 # ============== 时区 ==============
 
-CN_TIMEZONE = timezone(timedelta(hours=8))
+CN_TIMEZONE = timezone(timedelta(hours=2))
 
 def get_cn_time():
     return datetime.now(CN_TIMEZONE)
